@@ -14,6 +14,7 @@ import sys
 from datetime import datetime
 import numpy as np
 import random
+import subprocess
 
 def inverse_sigmoid(x):
     return torch.log(x/(1-x))
@@ -109,6 +110,30 @@ def build_scaling_rotation(s, r):
     L = R @ L
     return L
 
+def get_lowest_usage_gpu():
+    try:
+        # 执行 nvidia-smi 命令，获取每个 GPU 的显存使用情况
+        result = subprocess.run(['nvidia-smi', '--query-gpu=index,memory.used,memory.total',
+                                 '--format=csv,noheader,nounits'],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        output = result.stdout.strip().split('\n')
+
+        lowest_usage_gpu = -1
+        lowest_usage_ratio = float('inf')
+
+        # 解析输出，计算每个 GPU 的显存占用率
+        for line in output:
+            index, used_memory, total_memory = map(int, line.split(','))
+            usage_ratio = used_memory / total_memory
+            if usage_ratio < lowest_usage_ratio:
+                lowest_usage_ratio = usage_ratio
+                lowest_usage_gpu = index
+
+        return lowest_usage_gpu
+    except Exception as e:
+        print(f"Error getting GPU information: {e}")
+        return -1
+
 def safe_state(silent):
     old_f = sys.stdout
     class F:
@@ -130,4 +155,12 @@ def safe_state(silent):
     random.seed(0)
     np.random.seed(0)
     torch.manual_seed(0)
-    torch.cuda.set_device(torch.device("cuda:0"))
+
+    lowest_usage_gpu = get_lowest_usage_gpu()
+    if lowest_usage_gpu != -1:
+        torch.cuda.set_device(torch.device(f"cuda:{lowest_usage_gpu}"))
+        print(f"Using GPU {lowest_usage_gpu}")
+    else:
+        print("No GPU available. Using CPU.")
+
+       # torch.cuda.set_device(torch.device("cuda:0"))

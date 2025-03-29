@@ -29,41 +29,44 @@ except:
 
 class GaussianModel:
 
-    def setup_functions(self):
+    def setup_functions(self):#用于设置各种激活函数和构建协方差矩阵的方法
+        #构建协方差矩阵，该函数接受 scaling（尺度）、scaling_modifier（尺度修正因子）、rotation（旋转）作为参数
         def build_covariance_from_scaling_rotation(scaling, scaling_modifier, rotation):
             L = build_scaling_rotation(scaling_modifier * scaling, rotation)
             actual_covariance = L @ L.transpose(1, 2)
             symm = strip_symmetric(actual_covariance)
-            return symm
+            return symm #最终返回对称的协方差矩阵
         
-        self.scaling_activation = torch.exp
-        self.scaling_inverse_activation = torch.log
-
+        self.scaling_activation = torch.exp #将尺度激活函数设置为指数函数
+        self.scaling_inverse_activation = torch.log #将尺度逆激活函数设置为对数函数
+        #将协方差激活函数设置为上述 build_covariance_from_scaling_rotation 方法
         self.covariance_activation = build_covariance_from_scaling_rotation
-
+        #将不透明度激活函数设置为 sigmoid 函数
         self.opacity_activation = torch.sigmoid
+        #将不透明度逆激活函数设置为上述 inverse_sigmoid 方法
         self.inverse_opacity_activation = inverse_sigmoid
-
+        #用于归一化旋转矩阵
         self.rotation_activation = torch.nn.functional.normalize
 
 
     def __init__(self, sh_degree, optimizer_type="default"):
-        self.active_sh_degree = 0
-        self.optimizer_type = optimizer_type
-        self.max_sh_degree = sh_degree  
-        self._xyz = torch.empty(0)
+        self.active_sh_degree = 0 #球谐函数的阶数
+        self.optimizer_type = optimizer_type #优化器类型
+        self.max_sh_degree = sh_degree  #最大球谐函数的阶数
+        #存储不同信息的张量（tensor）
+        self._xyz = torch.empty(0) #空间位置
         self._features_dc = torch.empty(0)
         self._features_rest = torch.empty(0)
-        self._scaling = torch.empty(0)
-        self._rotation = torch.empty(0)
-        self._opacity = torch.empty(0)
+        self._scaling = torch.empty(0) #椭球的形状尺度
+        self._rotation = torch.empty(0) #椭球的旋转
+        self._opacity = torch.empty(0) #不透明度
         self.max_radii2D = torch.empty(0)
         self.xyz_gradient_accum = torch.empty(0)
         self.denom = torch.empty(0)
-        self.optimizer = None
-        self.percent_dense = 0
-        self.spatial_lr_scale = 0
-        self.setup_functions()
+        self.optimizer = None #初始化优化器为None
+        self.percent_dense = 0 #初始化密度为0
+        self.spatial_lr_scale = 0 #初始化空间学习率缩放为0
+        self.setup_functions() #调用 setup_functions 方法设置各种激活函数和构建协方差矩阵的方法
 
     def capture(self):
         return (
@@ -145,7 +148,7 @@ class GaussianModel:
     def oneupSHdegree(self):
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
-
+    #用于从给定的点云数据pcd创建对象的初始化状态
     def create_from_pcd(self, pcd : BasicPointCloud, cam_infos : int, spatial_lr_scale : float):
         self.spatial_lr_scale = spatial_lr_scale
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
@@ -260,6 +263,7 @@ class GaussianModel:
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
         self._opacity = optimizable_tensors["opacity"]
 
+    #这个方法的目的是从PLY文件中加载各种数据，并将这些数据存储为类中的属性，以便后续的操作和训练
     def load_ply(self, path, use_train_test_exp = False):
         plydata = PlyData.read(path)
         if use_train_test_exp:

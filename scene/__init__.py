@@ -21,25 +21,26 @@ from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
 class Scene:
 
     gaussians : GaussianModel
-
+    # 初始化方法
     def __init__(self, args : ModelParams, gaussians : GaussianModel, load_iteration=None, shuffle=True, resolution_scales=[1.0]):
         """b
         :param path: Path to colmap scene main folder.
         """
-        self.model_path = args.model_path
-        self.loaded_iter = None
-        self.gaussians = gaussians
+        self.model_path = args.model_path#将传入的 args 对象中的 model_path 属性赋值给 self.model_path，表示模型的路径。
+        self.loaded_iter = None #初始化 self.loaded_iter 为 None，用于存储已加载的模型的迭代次数。
+        self.gaussians = gaussians #将传入的高斯模型对象赋值给 self.gaussians 属性。
 
-        if load_iteration:
-            if load_iteration == -1:
+        if load_iteration:#可选参数，默认为 None。如果提供了值，它将被用作已加载模型的迭代次数。
+            if load_iteration == -1:#如果没有提供 load_iteration，则将点云数据和相机信息保存到文件中。
                 self.loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"))
             else:
                 self.loaded_iter = load_iteration
+            #输出已加载的模型的迭代次数。
             print("Loading trained model at iteration {}".format(self.loaded_iter))
 
         self.train_cameras = {}
         self.test_cameras = {}
-
+        # 根据场景的类型（Colmap 或 Blender）加载相应的场景信息，存储在 scene_info 变量中。
         if os.path.exists(os.path.join(args.source_path, "sparse")):
             scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.depths, args.eval, args.train_test_exp)
         elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
@@ -47,7 +48,7 @@ class Scene:
             scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.depths, args.eval)
         else:
             assert False, "Could not recognize scene type!"
-
+        # 保存点云数据和相机信息
         if not self.loaded_iter:
             with open(scene_info.ply_path, 'rb') as src_file, open(os.path.join(self.model_path, "input.ply") , 'wb') as dest_file:
                 dest_file.write(src_file.read())
@@ -61,28 +62,30 @@ class Scene:
                 json_cams.append(camera_to_JSON(id, cam))
             with open(os.path.join(self.model_path, "cameras.json"), 'w') as file:
                 json.dump(json_cams, file)
-
-        if shuffle:
+        #随机排序相机
+        if shuffle:#可选参数，默认为 True。如果为 True，则随机排序场景中的训练和测试相机。
             random.shuffle(scene_info.train_cameras)  # Multi-res consistent random shuffling
             random.shuffle(scene_info.test_cameras)  # Multi-res consistent random shuffling
-
+        #设置相机的范围
         self.cameras_extent = scene_info.nerf_normalization["radius"]
 
-        for resolution_scale in resolution_scales:
+        #加载训练和测试相机
+        for resolution_scale in resolution_scales:#可选参数，默认为 [1.0]。一个浮点数列表，用于指定训练和测试相机的分辨率缩放因子。
             print("Loading Training Cameras")
             self.train_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.train_cameras, resolution_scale, args, scene_info.is_nerf_synthetic, False)
             print("Loading Test Cameras")
             self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras, resolution_scale, args, scene_info.is_nerf_synthetic, True)
-
-        if self.loaded_iter:
+        #########################################################################
+        #加载或创建高斯模型
+        if self.loaded_iter:#如果已加载模型，则调用load_ply方法加载点云数据。
             self.gaussians.load_ply(os.path.join(self.model_path,
                                                            "point_cloud",
                                                            "iteration_" + str(self.loaded_iter),
                                                            "point_cloud.ply"), args.train_test_exp)
-        else:
+        else:#否则调用create_from_pcd方法根据场景信息中的点云数据创建高斯模型。
             self.gaussians.create_from_pcd(scene_info.point_cloud, scene_info.train_cameras, self.cameras_extent)
-
-    def save(self, iteration):
+        #########################################################################
+    def save(self, iteration):#该方法用于保存模型的点云数据和相机信息，其参数iteration指定了迭代次数
         point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
         self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
         exposure_dict = {
@@ -93,8 +96,9 @@ class Scene:
         with open(os.path.join(self.model_path, "exposure.json"), "w") as f:
             json.dump(exposure_dict, f, indent=2)
 
+    # 返回训练相机的列表，可以根据指定的缩放因子 scale 获取相应分辨率的相机列表。
     def getTrainCameras(self, scale=1.0):
         return self.train_cameras[scale]
-
+    # 返回测试相机的列表，可以根据指定的缩放因子 scale 获取相应分辨率的相机列表。
     def getTestCameras(self, scale=1.0):
         return self.test_cameras[scale]

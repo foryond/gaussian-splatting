@@ -45,46 +45,32 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
         sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
 
-    first_iter = 0 #初始化迭代次数。#初始化迭代次数。
-    tb_writer = prepare_output_and_logger(dataset)#设置 TensorBoard 写入器和日志记录器。
-    #(重点学习）创建一个 GaussianModel 类的实例，输入一系列参数，其参数取自数据集。
+    first_iter = 0
+    tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
-    ##（这个类的主要目的是处理场景的初始化、保存和获取相机信息等任务，）创建一个 Scene 类的实例，使用数据集和之前创建的 GaussianModel 实例作为参数。
     scene = Scene(dataset, gaussians)
-    # 设置GaussianModel实例的训练参数。
     gaussians.training_setup(opt)
-    # 如果提供了检查点路径。
     if checkpoint:
-        # 通过 torch.load(checkpoint) 加载检查点的模型参数和起始迭代次数。
         (model_params, first_iter) = torch.load(checkpoint)
-        # 通过 gaussians.restore 恢复模型的状态
         gaussians.restore(model_params, opt)
-    # 设置背景颜色，根据数据集是否有白色背景来选择。
+
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
-    # 将背景颜色转化为 PyTorch Tensor，并移到 GPU 上。
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
-    # 创建两个 CUDA 事件，用于测量迭代时间。
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
 
-    # 判断是否使用sparse adam优化器。
-    use_sparse_adam = opt.optimizer_type == "sparse_adam" and SPARSE_ADAM_AVAILABLE
-    # 设置深度 L1 损失的学习率函数。
-    depth_l1_weight = get_expon_lr_func(opt.depth_l1_weight_init, opt.depth_l1_weight_final , max_steps=opt.iterations)
+    use_sparse_adam = opt.optimizer_type == "sparse_adam" and SPARSE_ADAM_AVAILABLE 
+    depth_l1_weight = get_expon_lr_func(opt.depth_l1_weight_init, opt.depth_l1_weight_final, max_steps=opt.iterations)
 
     viewpoint_stack = scene.getTrainCameras().copy()
     viewpoint_indices = list(range(len(viewpoint_stack)))
     ema_loss_for_log = 0.0
     ema_Ll1depth_for_log = 0.0
 
-    # 创建一个进度条，用于显示训练进度。
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
-    # 接下来开始循环迭代
-    #主要的训练循环开始。
     for iteration in range(first_iter, opt.iterations + 1):
-        #检查 GUI 是否连接，如果连接则接收 GUI 发送的消息。
         if network_gui.conn == None:
             network_gui.try_connect()
         while network_gui.conn != None:
@@ -99,17 +85,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     break
             except Exception as e:
                 network_gui.conn = None
-        # 用于测量迭代时间。
+
         iter_start.record()
-        # 更新学习率。
+
         gaussians.update_learning_rate(iteration)
 
         # Every 1000 its we increase the levels of SH up to a maximum degree
-        # 每 1000 次迭代，增加球谐函数的阶数。
         if iteration % 1000 == 0:
             gaussians.oneupSHdegree()
 
-        # Pick a random Camera（随机选择一个训练相机）
+        # Pick a random Camera
         if not viewpoint_stack:
             viewpoint_stack = scene.getTrainCameras().copy()
             viewpoint_indices = list(range(len(viewpoint_stack)))
@@ -117,7 +102,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         viewpoint_cam = viewpoint_stack.pop(rand_idx)
         vind = viewpoint_indices.pop(rand_idx)
 
-        # Render （渲染图像，计算损失（l1 loss 和 SSIM loss））
+        # Render
         if (iteration - 1) == debug_from:
             pipe.debug = True
 
@@ -138,7 +123,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         else:
             ssim_value = ssim(image, gt_image)
 
-        # 计算渲染的图像与真实图像之间的loss。
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
 
         # Depth regularization
@@ -154,12 +138,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             Ll1depth = Ll1depth.item()
         else:
             Ll1depth = 0
-        # 更新损失。loss反向传播。
+
         loss.backward()
-        # 记录迭代时间。
+
         iter_end.record()
 
-        # 记录损失的指数移动平均值，并定期更新进度条。
         with torch.no_grad():
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
@@ -173,31 +156,24 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             # Log and save
             training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp), dataset.train_test_exp)
-            # 如果 达到保存迭代次数，则保存场景。
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
 
-            # Densification （在一定的迭代次数内进行密集化处理）
-            # 在达到指定的迭代次数之前执行以下操作。
+            # Densification
             if iteration < opt.densify_until_iter:
                 # Keep track of max radii in image-space for pruning
-                # 将每个像素位置上的最大半径记录在 max_radii2D 中。这是为了密集化时进行修剪（pruning）操作时的参考。
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
-                # 将与密集化相关的统计信息添加到 gaussians 模型中，包括视图空间点和可见性过滤器。
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
-                # 在指定的迭代次数之后，每隔一定的迭代间隔进行以下密集化操作。
+
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                    # 根据当前迭代次数设置密集化的阈值。如果当前迭代次数大于 opt.opacity_reset_interval，则设置 size_threshold 为 20，否则为 None。
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    # 执行密集化和修剪操作，其中包括梯度阈值、密集化阈值、相机范围和之前计算的 size_threshold。
                     gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
-                # 在每隔一定迭代次数或在白色背景数据集上的指定迭代次数时，执行以下操作。
+                
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                    # 重置模型中的某些参数，涉及透明度的操作，具体实现可以在 reset_opacity 方法中找到。
                     gaussians.reset_opacity()
 
-            # Optimizer step （执行优化器的步骤，然后清零梯度）
+            # Optimizer step
             if iteration < opt.iterations:
                 gaussians.exposure_optimizer.step()
                 gaussians.exposure_optimizer.zero_grad(set_to_none = True)
@@ -209,7 +185,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     gaussians.optimizer.step()
                     gaussians.optimizer.zero_grad(set_to_none = True)
 
-            # 如果达到检查点迭代次数，则保存检查点。
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
@@ -301,13 +276,9 @@ if __name__ == "__main__":
     safe_state(args.quiet)
 
     # Start GUI server, configure and run training
-    # 这行代码初始化一个 GUI 服务器，使用 args.ip 和 args.port 作为参数。这可能是一个用于监视和控制训练过程的图形用户界面的一部分。
     if not args.disable_viewer:
         network_gui.init(args.ip, args.port)
-    # 这行代码设置 PyTorch 是否要检测梯度计算中的异常。
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    # 输入的参数包括：模型的参数（传入的为数据集的位置）、优化器的参数、其他pipeline的参数，测试迭代次数、
-    # 保存迭代次数 、检查点迭代次数 、开始检查点 、调试起点
     training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
 
     # All done
