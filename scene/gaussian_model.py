@@ -33,7 +33,7 @@ class GaussianModel:
         #构建协方差矩阵，该函数接受 scaling（尺度）、scaling_modifier（尺度修正因子）、rotation（旋转）作为参数
         def build_covariance_from_scaling_rotation(scaling, scaling_modifier, rotation):
             L = build_scaling_rotation(scaling_modifier * scaling, rotation)
-            actual_covariance = L @ L.transpose(1, 2)
+            actual_covariance = L @ L.transpose(1, 2) #计算协方差矩阵 @为矩阵乘法运算符
             symm = strip_symmetric(actual_covariance)
             return symm #最终返回对称的协方差矩阵
         
@@ -276,17 +276,20 @@ class GaussianModel:
             else:
                 print(f"No exposure to be loaded at {exposure_file}")
                 self.pretrained_exposures = None
-
+        #读取点云数据的三维坐标，转换为（点数，3）的二维数组
         xyz = np.stack((np.asarray(plydata.elements[0]["x"]),
                         np.asarray(plydata.elements[0]["y"]),
                         np.asarray(plydata.elements[0]["z"])),  axis=1)
+        #提取点云的不透明度信息，并将其转换为（点数，1）的二维数组
         opacities = np.asarray(plydata.elements[0]["opacity"])[..., np.newaxis]
 
+        #提取点云的DC特征值
         features_dc = np.zeros((xyz.shape[0], 3, 1))
         features_dc[:, 0, 0] = np.asarray(plydata.elements[0]["f_dc_0"])
         features_dc[:, 1, 0] = np.asarray(plydata.elements[0]["f_dc_1"])
         features_dc[:, 2, 0] = np.asarray(plydata.elements[0]["f_dc_2"])
 
+        #提取点云中以“f_rest_”开头的特征属性名称到extra_f_names列表中，并排序
         extra_f_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("f_rest_")]
         extra_f_names = sorted(extra_f_names, key = lambda x: int(x.split('_')[-1]))
         assert len(extra_f_names)==3*(self.max_sh_degree + 1) ** 2 - 3
@@ -296,12 +299,14 @@ class GaussianModel:
         # Reshape (P,F*SH_coeffs) to (P, F, SH_coeffs except DC)
         features_extra = features_extra.reshape((features_extra.shape[0], 3, (self.max_sh_degree + 1) ** 2 - 1))
 
+        #提取点云中以“scale_”开头的特征属性名称到scale_names列表中，并排序
         scale_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("scale_")]
         scale_names = sorted(scale_names, key = lambda x: int(x.split('_')[-1]))
         scales = np.zeros((xyz.shape[0], len(scale_names)))
         for idx, attr_name in enumerate(scale_names):
             scales[:, idx] = np.asarray(plydata.elements[0][attr_name])
 
+        #提取点云中以“rot_”开头的特征属性名称到rot_names列表中，并排序
         rot_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("rot")]
         rot_names = sorted(rot_names, key = lambda x: int(x.split('_')[-1]))
         rots = np.zeros((xyz.shape[0], len(rot_names)))
@@ -332,6 +337,7 @@ class GaussianModel:
                 optimizable_tensors[group["name"]] = group["params"][0]
         return optimizable_tensors
 
+    #对优化器（self.optimizer）所管理的参数进行修剪
     def _prune_optimizer(self, mask):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
@@ -350,6 +356,7 @@ class GaussianModel:
                 optimizable_tensors[group["name"]] = group["params"][0]
         return optimizable_tensors
 
+    #根据给定的布尔掩码（mask）从点云中移除那些需要剪枝的点
     def prune_points(self, mask):
         valid_points_mask = ~mask
         optimizable_tensors = self._prune_optimizer(valid_points_mask)
@@ -367,6 +374,7 @@ class GaussianModel:
         self.max_radii2D = self.max_radii2D[valid_points_mask]
         self.tmp_radii = self.tmp_radii[valid_points_mask]
 
+    #张量优化
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
@@ -389,6 +397,7 @@ class GaussianModel:
 
         return optimizable_tensors
 
+    #将新的密集化点的相关特征保存在一个字典中
     def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii):
         d = {"xyz": new_xyz,
         "f_dc": new_features_dc,
@@ -396,7 +405,7 @@ class GaussianModel:
         "opacity": new_opacities,
         "scaling" : new_scaling,
         "rotation" : new_rotation}
-
+        #将字典中的张量连接（concatenate）成可优化的张量。这个方法的具体实现可能是将字典中的每个张量进行堆叠，以便于在优化器中进行处理
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
         self._xyz = optimizable_tensors["xyz"]
         self._features_dc = optimizable_tensors["f_dc"]
@@ -404,44 +413,60 @@ class GaussianModel:
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
-
+        #重新初始化一些用于梯度计算和密集化操作的变量
         self.tmp_radii = torch.cat((self.tmp_radii, new_tmp_radii))
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
+    #点云稠密化
+    #在满足梯度条件的情况下对点进行稠密化和分割操作，以增加点的数量并发送点云的表示
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
+        #获取初始点的数量
         n_init_points = self.get_xyz.shape[0]
         # Extract points that satisfy the gradient condition
+        #创建一个长度为初始点数量的梯度张量，并将计算得到的梯度填充到其中
         padded_grad = torch.zeros((n_init_points), device="cuda")
         padded_grad[:grads.shape[0]] = grads.squeeze()
+        #创建一个掩码，标记那些梯度大于等于指定阈值的点
         selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent)
-
+        #一步过滤掉那些缩放（scaling）大于一定百分比（self.percent_dense）的场景范围（scene_extent）的点，这样可以确保新添加的点不会太远离原始数据
+        #为每个点生成新的样本，其中stds是点的缩放，means是均值，rots是旋转矩阵
         stds = self.get_scaling[selected_pts_mask].repeat(N,1)
         means =torch.zeros((stds.size(0), 3),device="cuda")
-        samples = torch.normal(mean=means, std=stds)
+        samples = torch.normal(mean=means, std=stds)#使用均值和标准差生成样本
+        #为每个点构建旋转矩阵，并将其重复N次
         rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N,1,1)
+        #将旋转后的样本点添加 到原始点的位置
         new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)
+        #生成新的缩放参数
         new_scaling = self.scaling_inverse_activation(self.get_scaling[selected_pts_mask].repeat(N,1) / (0.8*N))
+        #将旋转矩阵重复N次
         new_rotation = self._rotation[selected_pts_mask].repeat(N,1)
+        #将原始点的特征重复N次
         new_features_dc = self._features_dc[selected_pts_mask].repeat(N,1,1)
         new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
         new_tmp_radii = self.tmp_radii[selected_pts_mask].repeat(N)
-
+        #调用另一个方法densification_postfix,该方法对新生成的点执行后处理操作（此处跟densify_and_clone一样）
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_tmp_radii)
-
+        #创建一个修剪（pruning）的过滤器，将新生成的点添加 到原始点的掩码之后
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
+        #根据修剪过滤器，修剪模型中的一些参数
         self.prune_points(prune_filter)
 
+    #点云稠密化
+    #在满足梯度条件的基础上，将满足缩放和不透明度条件的点进行复制，以增加点云的密度
     def densify_and_clone(self, grads, grad_threshold, scene_extent):
         # Extract points that satisfy the gradient condition
+        #创建一个掩码，标记满足梯度条件的点，具体来说，对于每个点，计算其梯度的L2范数，如果大于等于指定的梯度阈值（grad_threshold），则标记为True，否则为False
         selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(self.get_scaling, dim=1).values <= self.percent_dense*scene_extent)
-        
+        #在上述掩码的基础上，进一步过滤掉那些缩放（scaling）大于一定百分比（self.percent_dense）的场景范围（scene_extent）的点，这样可以确保新添加的点不会太远离原始数据
+        #根据掩码选取符合条件的点的其他特征，如颜色、透明度、缩放和旋转等
         new_xyz = self._xyz[selected_pts_mask]
         new_features_dc = self._features_dc[selected_pts_mask]
         new_features_rest = self._features_rest[selected_pts_mask]
@@ -453,24 +478,34 @@ class GaussianModel:
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii)
 
+    #点云修剪
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii):
+        #计算密度估计的梯度
         grads = self.xyz_gradient_accum / self.denom
+        #将梯度中的NaN（非数值）值设置为0，以处理可能的数值不稳定性
         grads[grads.isnan()] = 0.0
-
+        #将梯度的值限制在最大值范围内
         self.tmp_radii = radii
+        #对under reconstruction的区域进行稠密化和复制操作
         self.densify_and_clone(grads, max_grad, extent)
+        #对over reconstruction的区域进行稠密化和分割操作
         self.densify_and_split(grads, max_grad, extent)
 
+        #创建一个掩码，标记那些透明度小于指定阈值的点。squeeze()用于去除掩码中的单维度
         prune_mask = (self.get_opacity < min_opacity).squeeze()
-        if max_screen_size:
+        if max_screen_size:#如何设置了相机的范围
+            #创建一个掩码，标记在图像空间中半径大于指定阈值的点
             big_points_vs = self.max_radii2D > max_screen_size
+            #创建一个掩码，标记在世界空间中尺寸大于指定阈值的点
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
+            #将这两个掩码与先前的透明度掩码进行逻辑或操作，得到最终的修剪掩码
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
-        self.prune_points(prune_mask)
+        self.prune_points(prune_mask)#根据修剪掩码，修剪模型中的一些参数
+
         tmp_radii = self.tmp_radii
         self.tmp_radii = None
 
-        torch.cuda.empty_cache()
+        torch.cuda.empty_cache()#清理GPU缓存，释放一些内存
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)

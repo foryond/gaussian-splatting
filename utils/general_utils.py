@@ -140,22 +140,25 @@ def safe_state(silent):
         def __init__(self, silent):
             self.silent = silent
 
+        # 检查silent属性，如果不是静默模式，则在每行结尾添加当前时间戳，并将文本写入原始标准输出 2025-03-30 13:45 by Foryond
         def write(self, x):
             if not self.silent:
                 if x.endswith("\n"):
                     old_f.write(x.replace("\n", " [{}]\n".format(str(datetime.now().strftime("%d/%m %H:%M:%S")))))
                 else:
                     old_f.write(x)
-
+        # 刷新方法，将原始标准输出的缓冲区刷新 2025-03-30 13:46 by Foryond
         def flush(self):
             old_f.flush()
 
+    # 关闭方法，将原始标准输出关闭 2025-03-30 13:47 by Foryond
     sys.stdout = F(silent)
 
     random.seed(0)
     np.random.seed(0)
     torch.manual_seed(0)
 
+    # 找到当前显存占用最少的GPU使用 2025-03-30 13:47 by Foryond
     lowest_usage_gpu = get_lowest_usage_gpu()
     if lowest_usage_gpu != -1:
         torch.cuda.set_device(torch.device(f"cuda:{lowest_usage_gpu}"))
